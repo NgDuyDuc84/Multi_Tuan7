@@ -50,6 +50,7 @@
 
     .btn { background-color: var(--accent-blue); color: #000; border: none; padding: 0.6rem 1rem; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; display: inline-flex; align-items: center; justify-content: center; }
     .btn:hover { opacity: 0.9; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-danger { background-color: var(--accent-red); color: #fff; }
 
     .canvas-container { background-color: #090d16; border: 1px solid var(--border-color); border-radius: 8px; padding: 0.5rem; text-align: center; margin-bottom: 1rem; }
@@ -299,6 +300,7 @@
               <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">Kích thước cục tẩy: <span id="eraserVal">20</span>px</label>
               <input type="range" id="eraserSize" min="5" max="60" value="20" style="width: 100%; accent-color: var(--accent-blue);" oninput="document.getElementById('eraserVal').textContent=this.value">
             </div>
+            <button class="btn" id="undoButton" onclick="undoBoard()" disabled style="width: 100%; margin-bottom: 0.75rem;">↶ Hoàn tác (Ctrl+Z)</button>
             <button class="btn btn-danger" onclick="clearBoard()">Xóa Sạch Bảng Chung</button>
           </div>
 
@@ -542,6 +544,11 @@
     let currentColor = '#0f172a';
     let currentTool = 'brush'; // 'brush' hoặc 'eraser'
     let lastX = 0, lastY = 0;
+    let currentStroke = null;
+    let actionSequence = 0;
+    const boardActions = [];
+    const undoneActionIds = new Set();
+    const myActionIds = [];
 
     const myId = 'Client_' + Math.floor(Math.random() * 9000 + 1000);
     document.getElementById('myClientId').textContent = myId;
@@ -606,18 +613,29 @@
         } else if (topic === topicName) {
           if (data.sender === myId) return;
 
-          if (data.type === 'draw') {
-            drawLine(data.x1, data.y1, data.x2, data.y2, data.color, data.size);
-            logNet(`[${data.sender}] Vẽ nét x(${Math.round(data.x1)}->${Math.round(data.x2)})`);
-          } else if (data.type === 'erase') {
-            eraseLine(data.x1, data.y1, data.x2, data.y2, data.size);
-            logNet(`[${data.sender}] Tẩy nét x(${Math.round(data.x1)}->${Math.round(data.x2)})`);
-          } else if (data.type === 'fill') {
-            floodFill(data.x, data.y, data.color);
-            logNet(`[${data.sender}] Tô màu vùng x(${Math.round(data.x)}, y${Math.round(data.y)})`);
-          } else if (data.type === 'clear') {
-            ctx.clearRect(0, 0, canvas.width, canvas.height);
-            logNet(`[${data.sender}] Xóa sạch bảng`);
+          if (data.type === 'stroke') {
+            recordBoardAction(data);
+            logNet(`[${data.sender}] ${data.tool === 'eraser' ? 'Tẩy' : 'Vẽ'} một nét`);
+          } else if ((data.type === 'draw' || data.type === 'erase') && data.actionId) {
+            recordStrokeSegment(data);
+          } else if (data.type === 'draw' || data.type === 'erase' || data.type === 'fill' || data.type === 'clear') {
+            recordBoardAction({
+              ...data,
+              actionId: data.actionId || `${data.sender}_${Date.now()}_${actionSequence++}`
+            });
+            if (data.type === 'draw') {
+              logNet(`[${data.sender}] Vẽ nét x(${Math.round(data.x1)}->${Math.round(data.x2)})`);
+            } else if (data.type === 'erase') {
+              logNet(`[${data.sender}] Tẩy nét x(${Math.round(data.x1)}->${Math.round(data.x2)})`);
+            } else if (data.type === 'fill') {
+              logNet(`[${data.sender}] Tô màu vùng x(${Math.round(data.x)}, y${Math.round(data.y)})`);
+            } else {
+              logNet(`[${data.sender}] Xóa sạch bảng`);
+            }
+          } else if (data.type === 'undo' && data.actionId) {
+            undoneActionIds.add(data.actionId);
+            redrawBoard();
+            logNet(`[${data.sender}] Đã hoàn tác một thao tác`);
           }
         }
       } catch (e) {
@@ -645,19 +663,25 @@
 
     // Vẽ hoặc tẩy 1 đoạn từ (x1,y1) tới (x2,y2) rồi gửi lên MQTT
     function strokeSegment(x1, y1, x2, y2) {
-      let packet;
-      if (currentTool === 'eraser') {
-        const size = document.getElementById('eraserSize').value;
+      if (currentStroke.tool === 'eraser') {
+        const size = currentStroke.size;
         eraseLine(x1, y1, x2, y2, size);
-        packet = { sender: myId, type: 'erase', x1: x1, y1: y1, x2: x2, y2: y2, size: size };
       } else {
-        const size = document.getElementById('brushSize').value;
-        drawLine(x1, y1, x2, y2, currentColor, size);
-        packet = { sender: myId, type: 'draw', x1: x1, y1: y1, x2: x2, y2: y2, color: currentColor, size: size };
+        drawLine(x1, y1, x2, y2, currentStroke.color, currentStroke.size);
       }
-
+      currentStroke.points.push({ x: x2, y: y2 });
       if (client.connected) {
-        client.publish(topicName, JSON.stringify(packet));
+        client.publish(topicName, JSON.stringify({
+          sender: myId,
+          actionId: currentStroke.actionId,
+          type: currentStroke.tool === 'eraser' ? 'erase' : 'draw',
+          x1,
+          y1,
+          x2,
+          y2,
+          color: currentStroke.color,
+          size: currentStroke.size
+        }));
       }
     }
 
@@ -666,20 +690,23 @@
       const pos = getCursorPos(e);
       if (currentTool === 'fill') {
         floodFill(pos.x, pos.y, currentColor);
-        if (client.connected) {
-          client.publish(topicName, JSON.stringify({
-            sender: myId,
-            type: 'fill',
-            x: pos.x,
-            y: pos.y,
-            color: currentColor
-          }));
-        }
+        recordLocalAction({ type: 'fill', x: pos.x, y: pos.y, color: currentColor }, true);
         logNet(`Bạn đã tô màu vùng x(${Math.round(pos.x)}, y${Math.round(pos.y)}).`);
         return;
       }
 
       painting = true;
+      currentStroke = {
+        type: 'stroke',
+        sender: myId,
+        tool: currentTool,
+        color: currentColor,
+        actionId: createActionId(),
+        size: currentTool === 'eraser'
+          ? Number(document.getElementById('eraserSize').value)
+          : Number(document.getElementById('brushSize').value),
+        points: [{ x: pos.x, y: pos.y }]
+      };
       lastX = pos.x;
       lastY = pos.y;
       // Bấm 1 cái (chưa kéo) vẫn tạo ra 1 chấm / tẩy 1 vùng tròn
@@ -702,6 +729,10 @@
     function endPosition(e) {
       if (!painting) return;
       painting = false;
+      if (currentStroke) {
+        recordLocalAction(currentStroke, true, false);
+        currentStroke = null;
+      }
     }
 
     canvas.addEventListener('mousedown', startPosition);
@@ -723,6 +754,112 @@
       ctx.stroke();
       ctx.closePath();
     }
+
+    function applyBoardAction(action) {
+      if (action.type === 'stroke') {
+        const points = action.points || [];
+        if (points.length === 1) {
+          const { x, y } = points[0];
+          if (action.tool === 'eraser') eraseLine(x, y, x, y, action.size);
+          else drawLine(x, y, x, y, action.color, action.size);
+        }
+        for (let i = 1; i < points.length; i++) {
+          const previous = points[i - 1];
+          const point = points[i];
+          if (action.tool === 'eraser') eraseLine(previous.x, previous.y, point.x, point.y, action.size);
+          else drawLine(previous.x, previous.y, point.x, point.y, action.color, action.size);
+        }
+      } else if (action.type === 'draw') {
+        drawLine(action.x1, action.y1, action.x2, action.y2, action.color, action.size);
+      } else if (action.type === 'erase') {
+        eraseLine(action.x1, action.y1, action.x2, action.y2, action.size);
+      } else if (action.type === 'fill') {
+        floodFill(action.x, action.y, action.color);
+      } else if (action.type === 'clear') {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+
+    function redrawBoard() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      boardActions.forEach(action => {
+        if (!undoneActionIds.has(action.actionId)) applyBoardAction(action);
+      });
+    }
+
+    function recordBoardAction(action) {
+      boardActions.push(action);
+      if (!undoneActionIds.has(action.actionId)) applyBoardAction(action);
+      if (action.sender === myId) {
+        myActionIds.push(action.actionId);
+        updateUndoButton();
+      }
+    }
+
+    function recordStrokeSegment(data) {
+      let action = boardActions.find(item => item.actionId === data.actionId);
+      if (!action) {
+        action = {
+          type: 'stroke',
+          sender: data.sender,
+          actionId: data.actionId,
+          tool: data.type === 'erase' ? 'eraser' : 'brush',
+          color: data.color,
+          size: data.size,
+          points: [{ x: data.x1, y: data.y1 }]
+        };
+        boardActions.push(action);
+      }
+      action.points.push({ x: data.x2, y: data.y2 });
+      if (undoneActionIds.has(action.actionId)) return;
+      if (action.tool === 'eraser') eraseLine(data.x1, data.y1, data.x2, data.y2, data.size);
+      else drawLine(data.x1, data.y1, data.x2, data.y2, data.color, data.size);
+    }
+
+    function createActionId() {
+      return `${myId}_${Date.now()}_${actionSequence++}`;
+    }
+
+    function recordLocalAction(action, alreadyDrawn, shouldPublish = true) {
+      action.sender = myId;
+      action.actionId = action.actionId || createActionId();
+      boardActions.push(action);
+      if (!alreadyDrawn) applyBoardAction(action);
+      myActionIds.push(action.actionId);
+      updateUndoButton();
+      if (shouldPublish && client.connected) client.publish(topicName, JSON.stringify(action));
+    }
+
+    function updateUndoButton() {
+      document.getElementById('undoButton').disabled = myActionIds.length === 0;
+    }
+
+    function undoBoard() {
+      while (myActionIds.length && undoneActionIds.has(myActionIds[myActionIds.length - 1])) {
+        myActionIds.pop();
+      }
+      const actionId = myActionIds.pop();
+      if (!actionId) return;
+
+      undoneActionIds.add(actionId);
+      redrawBoard();
+      updateUndoButton();
+      if (client.connected) {
+        client.publish(topicName, JSON.stringify({ sender: myId, type: 'undo', actionId }));
+      }
+      logNet('Bạn đã hoàn tác thao tác vẽ gần nhất.');
+    }
+
+    document.addEventListener('keydown', e => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z' || e.shiftKey) return;
+      const target = e.target;
+      if (target instanceof HTMLElement && (
+        target.isContentEditable ||
+        ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+      )) return;
+      e.preventDefault();
+      undoBoard();
+    });
 
     function floodFill(x, y, color) {
       if (!Number.isFinite(x) || !Number.isFinite(y) || !/^#[0-9a-f]{6}$/i.test(color)) return;
@@ -865,9 +1002,7 @@
 
     function clearBoard() {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      if (client.connected) {
-        client.publish(topicName, JSON.stringify({ sender: myId, type: 'clear' }));
-      }
+      recordLocalAction({ type: 'clear' }, true);
       logNet('Bạn đã gửi lệnh xóa toàn bộ bảng vẽ.');
     }
 
