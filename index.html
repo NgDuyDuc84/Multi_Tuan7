@@ -63,6 +63,19 @@
 
     .client-list { max-height: 180px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.5rem; }
     .client-item { background-color: #0f172a; border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem 0.75rem; font-size: 0.8rem; display: flex; align-items: center; justify-content: space-between; }
+    .whiteboard-column { min-width: 0; }
+    .chat-messages { height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 0.65rem; background-color: #090d16; border: 1px solid var(--border-color); border-radius: 6px; padding: 0.75rem; }
+    .chat-message { max-width: 85%; align-self: flex-start; background-color: #1e293b; border: 1px solid var(--border-color); border-radius: 8px 8px 8px 2px; padding: 0.5rem 0.65rem; overflow-wrap: anywhere; }
+    .chat-message.mine { align-self: flex-end; background-color: rgba(56, 189, 248, 0.12); border-color: rgba(56, 189, 248, 0.4); border-radius: 8px 8px 2px 8px; }
+    .chat-message-meta { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.25rem; font-size: 0.72rem; }
+    .chat-message-name { color: var(--accent-blue); font-weight: 600; }
+    .chat-message-time { color: var(--text-muted); }
+    .chat-message-text { font-size: 0.85rem; line-height: 1.45; white-space: pre-wrap; }
+    .chat-form { display: grid; grid-template-columns: minmax(120px, 0.35fr) minmax(0, 1fr) auto; gap: 0.5rem; margin-top: 0.75rem; }
+    .chat-input { min-width: 0; background-color: #0f172a; color: var(--text-main); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.6rem; font-size: 0.85rem; }
+    .chat-input:focus { outline: none; border-color: var(--accent-blue); }
+    .chat-status { color: var(--text-muted); font-size: 0.75rem; margin-top: 0.5rem; min-height: 1em; }
+    @media (max-width: 600px) { .chat-form { grid-template-columns: 1fr; } }
     .color-picker { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; align-items: center; }
     .color-btn {
       width: 28px; height: 28px; border-radius: 50%; border: 3px solid transparent;
@@ -310,13 +323,33 @@
           </div>
         </div>
 
-        <div class="card" style="display: flex; flex-direction: column;">
-          <div class="card-title">
-            <span>Bảng Vẽ Phân Tán (Hỗ trợ PC & Điện thoại cuộn trang)</span>
-            <span class="badge badge-green">Optimized Touch</span>
+        <div class="whiteboard-column">
+          <div class="card" style="display: flex; flex-direction: column;">
+            <div class="card-title">
+              <span>Bảng Vẽ Phân Tán (Hỗ trợ PC & Điện thoại cuộn trang)</span>
+              <span class="badge badge-green">Optimized Touch</span>
+            </div>
+            <div class="canvas-container" style="flex: 1; margin-bottom: 0;">
+              <canvas id="whiteboard" class="drawing-canvas" width="1000" height="600" style="height: 560px;"></canvas>
+            </div>
           </div>
-          <div class="canvas-container" style="flex: 1; margin-bottom: 0;">
-            <canvas id="whiteboard" class="drawing-canvas" width="1000" height="600" style="height: 560px;"></canvas>
+
+          <div class="card">
+            <div class="card-title">
+              <span>💬 Chat phòng vẽ</span>
+              <span class="badge badge-blue">Realtime</span>
+            </div>
+            <div id="chatMessages" class="chat-messages" role="log" aria-live="polite" aria-label="Tin nhắn trong phòng vẽ">
+              <div id="chatEmptyState" style="color: var(--text-muted); font-size: 0.8rem; text-align: center; margin: auto;">
+                Chưa có tin nhắn. Hãy bắt đầu trò chuyện!
+              </div>
+            </div>
+            <form class="chat-form" onsubmit="sendChatMessage(event)">
+              <input id="chatDisplayName" class="chat-input" type="text" maxlength="24" placeholder="Tên hiển thị" aria-label="Tên hiển thị">
+              <textarea id="chatInput" class="chat-input" rows="2" maxlength="500" placeholder="Nhập tin nhắn... (Enter gửi, Shift+Enter xuống dòng)" aria-label="Tin nhắn" onkeydown="if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); this.form.requestSubmit(); }" required></textarea>
+              <button id="chatSendButton" class="btn" type="submit" disabled>Gửi</button>
+            </form>
+            <div id="chatStatus" class="chat-status" role="status">Đang kết nối để bật chat...</div>
           </div>
         </div>
       </div>
@@ -555,6 +588,68 @@
 
     const topicName = 'huflit_nhom_duc_lmang_tuan7_k9x2/whiteboard/room';
     const presenceTopic = 'huflit_nhom_duc_lmang_tuan7_k9x2/whiteboard/presence';
+    const chatTopic = 'huflit_nhom_duc_lmang_tuan7_k9x2/whiteboard/chat';
+    document.getElementById('chatDisplayName').value = myId;
+
+    function appendChatMessage(senderName, message, timestamp, isMine = false) {
+      const messages = document.getElementById('chatMessages');
+      const emptyState = document.getElementById('chatEmptyState');
+      if (emptyState) emptyState.remove();
+
+      const item = document.createElement('div');
+      item.className = `chat-message${isMine ? ' mine' : ''}`;
+      const meta = document.createElement('div');
+      meta.className = 'chat-message-meta';
+      const name = document.createElement('span');
+      name.className = 'chat-message-name';
+      name.textContent = senderName;
+      const time = document.createElement('time');
+      time.className = 'chat-message-time';
+      time.textContent = new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      const text = document.createElement('div');
+      text.className = 'chat-message-text';
+      text.textContent = message;
+
+      meta.append(name, time);
+      item.append(meta, text);
+      messages.appendChild(item);
+      while (messages.children.length > 100) messages.firstElementChild.remove();
+      messages.scrollTop = messages.scrollHeight;
+    }
+
+    function sendChatMessage(event) {
+      event.preventDefault();
+      const input = document.getElementById('chatInput');
+      const message = input.value.trim();
+      if (!message) return;
+      if (message.length > 500) {
+        document.getElementById('chatStatus').textContent = 'Tin nhắn tối đa 500 ký tự.';
+        return;
+      }
+      if (!client.connected) {
+        document.getElementById('chatStatus').textContent = 'Mất kết nối MQTT. Vui lòng đợi kết nối lại.';
+        return;
+      }
+
+      const displayName = document.getElementById('chatDisplayName').value.trim().slice(0, 24) || myId;
+      const data = {
+        type: 'chat',
+        sender: myId,
+        senderName: displayName,
+        message,
+        timestamp: Date.now()
+      };
+      client.publish(chatTopic, JSON.stringify(data), err => {
+        if (err) {
+          document.getElementById('chatStatus').textContent = 'Không gửi được tin nhắn. Vui lòng thử lại.';
+          console.error('Không gửi được tin nhắn MQTT:', err);
+          return;
+        }
+        appendChatMessage(data.senderName, data.message, data.timestamp, true);
+        input.value = '';
+        document.getElementById('chatStatus').textContent = 'Tin nhắn đã được gửi.';
+      });
+    }
 
     const activeClients = new Map();
     activeClients.set(myId, { id: myId, status: 'Đang hoạt động', lastSeen: Date.now() });
@@ -591,9 +686,18 @@
       logNet('Đã kết nối thành công tới Public MQTT Broker!');
       document.getElementById('connStatus').textContent = 'Đã kết nối';
       document.getElementById('connStatus').className = 'badge badge-green';
+      document.getElementById('chatSendButton').disabled = true;
+      document.getElementById('chatStatus').textContent = 'Đang đăng ký kênh chat...';
 
-      client.subscribe([topicName, presenceTopic], (err) => {
-        if (!err) logNet('Đã Subscribe vào các Topic chính.');
+      client.subscribe([topicName, presenceTopic, chatTopic], (err) => {
+        if (err) {
+          document.getElementById('chatStatus').textContent = 'Không đăng ký được kênh chat.';
+          console.error('Không đăng ký được MQTT topic:', err);
+          return;
+        }
+        document.getElementById('chatSendButton').disabled = false;
+        document.getElementById('chatStatus').textContent = 'Đã kết nối phòng chat. Tin nhắn không được lưu khi tải lại trang.';
+        logNet('Đã Subscribe vào các Topic chính.');
       });
 
       setInterval(() => {
@@ -610,6 +714,13 @@
             activeClients.set(data.id, { id: data.id, status: 'Trực tuyến', lastSeen: Date.now() });
             updateClientListUI();
           }
+        } else if (topic === chatTopic) {
+          if (data.type !== 'chat' || data.sender === myId ||
+              typeof data.sender !== 'string' || typeof data.senderName !== 'string' ||
+              typeof data.message !== 'string' || !data.message.trim() ||
+              data.message.length > 500 || !Number.isFinite(data.timestamp) ||
+              !Number.isFinite(new Date(data.timestamp).getTime())) return;
+          appendChatMessage(data.senderName.trim().slice(0, 24) || data.sender, data.message.trim(), data.timestamp);
         } else if (topic === topicName) {
           if (data.sender === myId) return;
 
@@ -641,6 +752,11 @@
       } catch (e) {
         console.error(e);
       }
+    });
+
+    client.on('offline', () => {
+      document.getElementById('chatSendButton').disabled = true;
+      document.getElementById('chatStatus').textContent = 'Mất kết nối MQTT. Đang thử kết nối lại...';
     });
 
     function getCursorPos(e) {
