@@ -67,6 +67,11 @@
     .color-picker { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
     .color-btn { width: 32px; height: 32px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
     .color-btn.active { border-color: #fff; transform: scale(1.1); }
+
+    .tool-row { display: flex; gap: 0.5rem; }
+    .tool-btn { flex: 1; background-color: #0f172a; color: var(--text-muted); border: 1px solid var(--border-color); border-radius: 6px; padding: 0.5rem; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+    .tool-btn:hover { color: var(--text-main); }
+    .tool-btn.active { background-color: rgba(56, 189, 248, 0.15); border-color: var(--accent-blue); color: var(--accent-blue); }
     
     code.inline-code { background-color: #334155; color: var(--accent-blue); padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.8rem; }
     .theory-text { font-size: 0.9rem; color: var(--text-muted); line-height: 1.7; margin-bottom: 0.75rem; }
@@ -218,6 +223,13 @@
           <div class="card">
             <div class="card-title"><span>Công Cụ Vẽ</span></div>
             <div style="margin-bottom: 0.75rem;">
+              <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">Chọn công cụ:</label>
+              <div class="tool-row">
+                <button class="tool-btn active" id="toolBrush" onclick="setTool('brush')">✏️ Cọ vẽ</button>
+                <button class="tool-btn" id="toolEraser" onclick="setTool('eraser')">🧽 Cục tẩy</button>
+              </div>
+            </div>
+            <div style="margin-bottom: 0.75rem;">
               <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">Màu sắc nét cọ:</label>
               <div class="color-picker">
                 <div class="color-btn active" style="background-color: #0f172a;" onclick="setColor('#0f172a', this)"></div>
@@ -229,6 +241,10 @@
             <div style="margin-bottom: 1rem;">
               <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">Độ dày: <span id="sizeVal">4</span>px</label>
               <input type="range" id="brushSize" min="1" max="20" value="4" style="width: 100%; accent-color: var(--accent-blue);" oninput="document.getElementById('sizeVal').textContent=this.value">
+            </div>
+            <div style="margin-bottom: 1rem;">
+              <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 0.25rem;">Kích thước cục tẩy: <span id="eraserVal">20</span>px</label>
+              <input type="range" id="eraserSize" min="5" max="60" value="20" style="width: 100%; accent-color: var(--accent-blue);" oninput="document.getElementById('eraserVal').textContent=this.value">
             </div>
             <button class="btn btn-danger" onclick="clearBoard()">Xóa Sạch Bảng Chung</button>
           </div>
@@ -478,6 +494,7 @@
     const ctx = canvas.getContext('2d');
     let painting = false;
     let currentColor = '#0f172a';
+    let currentTool = 'brush'; // 'brush' hoặc 'eraser'
     let lastX = 0, lastY = 0;
 
     const myId = 'Client_' + Math.floor(Math.random() * 9000 + 1000);
@@ -546,6 +563,9 @@
           if (data.type === 'draw') {
             drawLine(data.x1, data.y1, data.x2, data.y2, data.color, data.size);
             logNet(`[${data.sender}] Vẽ nét x(${Math.round(data.x1)}->${Math.round(data.x2)})`);
+          } else if (data.type === 'erase') {
+            eraseLine(data.x1, data.y1, data.x2, data.y2, data.size);
+            logNet(`[${data.sender}] Tẩy nét x(${Math.round(data.x1)}->${Math.round(data.x2)})`);
           } else if (data.type === 'clear') {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             logNet(`[${data.sender}] Xóa sạch bảng`);
@@ -566,10 +586,30 @@
         clientX = e.clientX;
         clientY = e.clientY;
       }
+      // Quy đổi từ pixel hiển thị trên màn hình sang pixel thật của canvas (1000x600)
+      // để nét vẽ / cục tẩy nằm đúng vị trí con trỏ
       return {
-        x: clientX - rect.left,
-        y: clientY - rect.top
+        x: (clientX - rect.left) * (canvas.width / rect.width),
+        y: (clientY - rect.top) * (canvas.height / rect.height)
       };
+    }
+
+    // Vẽ hoặc tẩy 1 đoạn từ (x1,y1) tới (x2,y2) rồi gửi lên MQTT
+    function strokeSegment(x1, y1, x2, y2) {
+      let packet;
+      if (currentTool === 'eraser') {
+        const size = document.getElementById('eraserSize').value;
+        eraseLine(x1, y1, x2, y2, size);
+        packet = { sender: myId, type: 'erase', x1: x1, y1: y1, x2: x2, y2: y2, size: size };
+      } else {
+        const size = document.getElementById('brushSize').value;
+        drawLine(x1, y1, x2, y2, currentColor, size);
+        packet = { sender: myId, type: 'draw', x1: x1, y1: y1, x2: x2, y2: y2, color: currentColor, size: size };
+      }
+
+      if (client.connected) {
+        client.publish(topicName, JSON.stringify(packet));
+      }
     }
 
     function startPosition(e) {
@@ -578,6 +618,8 @@
       const pos = getCursorPos(e);
       lastX = pos.x;
       lastY = pos.y;
+      // Bấm 1 cái (chưa kéo) vẫn tạo ra 1 chấm / tẩy 1 vùng tròn
+      strokeSegment(lastX, lastY, lastX, lastY);
     }
 
     function drawPosition(e) {
@@ -586,21 +628,8 @@
       const pos = getCursorPos(e);
       const currentX = pos.x;
       const currentY = pos.y;
-      const size = document.getElementById('brushSize').value;
 
-      drawLine(lastX, lastY, currentX, currentY, currentColor, size);
-
-      if (client.connected) {
-        const packet = JSON.stringify({
-          sender: myId,
-          type: 'draw',
-          x1: lastX, y1: lastY,
-          x2: currentX, y2: currentY,
-          color: currentColor,
-          size: size
-        });
-        client.publish(topicName, packet);
-      }
+      strokeSegment(lastX, lastY, currentX, currentY);
 
       lastX = currentX;
       lastY = currentY;
@@ -629,6 +658,26 @@
       ctx.lineCap = 'round';
       ctx.stroke();
       ctx.closePath();
+    }
+
+    // Cục tẩy: xóa pixel theo nét kéo (destination-out làm pixel trở lại trong suốt)
+    function eraseLine(x1, y1, x2, y2, size) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.lineWidth = size;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function setTool(tool) {
+      currentTool = tool;
+      document.getElementById('toolBrush').classList.toggle('active', tool === 'brush');
+      document.getElementById('toolEraser').classList.toggle('active', tool === 'eraser');
+      canvas.style.cursor = (tool === 'eraser') ? 'cell' : 'crosshair';
     }
 
     function setColor(color, element) {
